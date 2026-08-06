@@ -52,12 +52,33 @@ async function geminiReply(aiConfig, userMessage, history) {
       contents: [{ role: 'user', parts }],
       generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
     }),
+    signal: AbortSignal.timeout(25000),
   });
+  if (res.status === 429) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const retry = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts }],
+        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+      }),
+      signal: AbortSignal.timeout(25000),
+    });
+    if (!retry.ok) {
+      const errText = await retry.text();
+      throw new Error(`Gemini HTTP ${retry.status}: ${errText.slice(0, 200)}`);
+    }
+    return extractText(await retry.json());
+  }
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`Gemini HTTP ${res.status}: ${errText.slice(0, 200)}`);
   }
-  const data = await res.json();
+  return extractText(await res.json());
+}
+
+function extractText(data) {
   const outParts = (data?.candidates?.[0]?.content?.parts || []).filter((p) => p.text);
   const text = outParts.map((p) => p.text).join('').trim();
   if (!text) throw new Error('Gemini returned empty response');

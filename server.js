@@ -192,6 +192,9 @@ async function handleMessage(msg) {
       if (aiText.ok) {
         reply = aiText.text;
         hist.push(`مساعد: ${aiText.text}`);
+      } else {
+        logLine('error', `فشل الرد الذكي (${aiText.error}) — رد احتياطي`);
+        reply = config.ai?.fallbackReply || 'عذرًا على التأخير! الخدمة مشغولة حاليًا — جرب تسأل بعد دقيقة، أو اكتب ( قائمة ) لمشاهدة المنتجات. 😊';
       }
     } else {
       reply = null;
