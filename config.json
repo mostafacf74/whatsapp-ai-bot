@@ -1,0 +1,31 @@
+﻿{
+  "port": 3000,
+  "token": "change-me-123",
+  "language": "ar",
+  "groupsEnabled": false,
+  "greeting": {
+    "enabled": true,
+    "firstMessage": "أهلاً بيك في خدمتنا 🤝\nاكتب ( قائمة ) عشان تشوف منتجاتنا، أو اسألني عن أي حاجة وهارد عليك فورًا."
+  },
+  "ai": {
+    "enabled": true,
+    "provider": "gemini",
+    "apiKey": "",
+    "model": "gemini-flash-latest",
+    "systemPrompt": "أنت مساعد متجر محترم بتتكلم بالعربي مع العملاء. رد بإيجاز ولطف، واعرض المساعدة، وارشح المنتجات لما يطلبوا. متستخدش عبارات عامة مكررة.",
+    "maxRepliesPerDay": 300,
+    "maxRepliesPerHour": 50,
+    "minDelayMs": 1200
+  },
+  "replies": [
+    { "keywords": ["سعر", "الاسعار", "السعر", "price"], "reply": "📦 الأسعار كالتالي:\n1) ...\n2) ...\nاكتب ( قائمة ) لمشاهدة كل المنتجات." },
+    { "keywords": ["مواعيد", "الدوام", "ساعات", "timing", "hours"], "reply": "🕐 مواعيد العمل: يوميًا من 10 صباحًا حتى 10 مساءً." },
+    { "keywords": ["توصيل", "الشحن", "delivery", "shipping"], "reply": "🚚 التوصيل متوفر: 24-48 ساعة داخل المدينة، ويتم الدفع عند الاستلام." },
+    { "keywords": ["شكرا", "شكراً", "thanks", "thank"], "reply": "العفو! 🙏 لو محتاج أي حاجة تانية أنا موجود." }
+  ],
+  "catalog": [
+    { "name": "منتج 1", "price": "100 ج", "desc": "وصف المنتج الأول" },
+    { "name": "منتج 2", "price": "250 ج", "desc": "وصف المنتج الثاني" }
+  ],
+  "catalogCommands": ["قائمة", "المنتجات", "كتالوج", "menu", "catalog", "products"]
+}

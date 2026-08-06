@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: whatsapp-ai-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/status
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: HOST
+        value: 0.0.0.0
