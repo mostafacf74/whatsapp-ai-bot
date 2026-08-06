@@ -23,9 +23,15 @@ let starting = false;
 let logBuffer = [];
 const MAX_LOG = 500;
 const contacts = new Set();
-const CONTACTS_FILE = path.join(__dirname, 'store', 'contacts.json');
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
+const CONTACTS_FILE = path.join(DATA_DIR, 'store', 'contacts.json');
 const history = new Map();
-const CREDS_PATH = path.join(__dirname, 'session');
+const CREDS_PATH = path.join(DATA_DIR, 'session');
+
+try {
+  fs.mkdirSync(path.join(DATA_DIR, 'store'), { recursive: true });
+  fs.mkdirSync(CREDS_PATH, { recursive: true });
+} catch {}
 
 try {
   const saved = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8'));
@@ -297,8 +303,24 @@ app.post('/api/restart', checkAuth, (req, res) => {
 });
 
 const PORT = Number(process.env.PORT || config.port || 3000);
-const HOST = process.env.HOST || '127.0.0.1';
-app.listen(PORT, HOST, () => {
-  logLine('info', `لوحة API شغالة على ${HOST}:${PORT}`);
-  connect();
-});
+function normalizeHost(raw) {
+  const h = String(raw || '0.0.0.0').trim();
+  if (h === '::' || h === '[::]' || h.includes('::')) return '0.0.0.0';
+  return h;
+}
+function startListening() {
+  const host = normalizeHost(process.env.HOST);
+  const server = app.listen(PORT, host, () => {
+    logLine('info', `لوحة API شغالة على ${host}:${PORT}`);
+    connect();
+  });
+  server.on('error', (err) => {
+    logLine('error', `فشل فتح المنفذ على ${host} (${err.message}) — إعادة المحاولة على 0.0.0.0`);
+    try { server.close(); } catch {}
+    setTimeout(() => app.listen(PORT, '0.0.0.0', () => {
+      logLine('info', `لوحة API شغالة على 0.0.0.0:${PORT}`);
+      connect();
+    }), 500);
+  });
+}
+startListening();
