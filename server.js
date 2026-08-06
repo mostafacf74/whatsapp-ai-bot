@@ -162,6 +162,7 @@ async function handleMessage(msg) {
   const isGroup = jid.endsWith('@g.us');
   const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
   if (!text) return;
+  logLine('debug', `رسالة جديدة من ${jid}: ${text.slice(0, 60)}`);
 
   const from = isGroup ? msg.key.participant : jid;
   const contactName = (msg.pushName || 'العميل').split(' ')[0];

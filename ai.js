@@ -50,7 +50,7 @@ async function geminiReply(aiConfig, userMessage, history) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
-      generationConfig: { temperature: 0.7, maxOutputTokens: 700 },
+      generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
     }),
   });
   if (!res.ok) {
@@ -58,7 +58,8 @@ async function geminiReply(aiConfig, userMessage, history) {
     throw new Error(`Gemini HTTP ${res.status}: ${errText.slice(0, 200)}`);
   }
   const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('')?.trim();
+  const outParts = (data?.candidates?.[0]?.content?.parts || []).filter((p) => p.text);
+  const text = outParts.map((p) => p.text).join('').trim();
   if (!text) throw new Error('Gemini returned empty response');
   return text;
 }
