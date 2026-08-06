@@ -226,6 +226,27 @@ async function sendMessage(phone, text) {
 const app = express();
 app.use(express.json());
 
+app.get('/', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhatsApp AI Bot</title><style>
+body{font-family:Segoe UI,Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#1e293b;border-radius:16px;padding:40px 48px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+h1{font-size:22px;margin:0 0 8px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-left:8px}
+.green{background:#22c55e}.amber{background:#f59e0b}.red{background:#ef4444}
+p{color:#94a3b8;margin:6px 0}a{color:#38bdf8;text-decoration:none}
+</style></head><body><div class="card">
+<h1><span class="dot" id="d"></span>WhatsApp AI Bot</h1>
+<p id="s">...</p><p>البوت شغال على هذه السحابة — الردود التلقائية على واتساب 24/7</p>
+<p><a href="/api/status">/api/status</a></p>
+<script>
+fetch('/api/status').then(r=>r.json()).then(j=>{
+document.getElementById('s').textContent='الحالة: '+(j.connected?'متصل بواتساب ✓':(j.hasQr?'بانتظار ربط جهاز (QR)':'جارٍ الاتصال...'));
+document.getElementById('d').className='dot '+(j.connected?'green':(j.hasQr?'amber':'red'));
+}).catch(()=>{document.getElementById('s').textContent='جارٍ التشغيل...';});
+</script></div></body></html>`);
+});
+
 function checkAuth(req, res, next) {
   const token = config.token;
   if (token && req.get('x-token') !== token) {
