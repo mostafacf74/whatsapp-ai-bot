@@ -13,30 +13,37 @@ if (process.env.GEMINI_API_KEY) {
   config.ai = { ...(config.ai || {}), apiKey: process.env.GEMINI_API_KEY };
 }
 
-let sock = null;
-let lastQr = null;
-let pairCode = null;
-let connected = false;
-let pairingPhone = null;
-let restartTimer = null;
-let starting = false;
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
+const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
+const CONTACTS_FILE = path.join(DATA_DIR, 'store', 'contacts.json');
+const SESSIONS_META_FILE = path.join(DATA_DIR, 'store', 'sessions.json');
+
 let logBuffer = [];
 const MAX_LOG = 500;
 const contacts = new Set();
-const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || __dirname;
-const CONTACTS_FILE = path.join(DATA_DIR, 'store', 'contacts.json');
-const history = new Map();
-const CREDS_PATH = path.join(DATA_DIR, 'session');
+const sessions = new Map();
+const sessionNames = {}; // id -> اسم مخصص
 
 try {
   fs.mkdirSync(path.join(DATA_DIR, 'store'), { recursive: true });
-  fs.mkdirSync(CREDS_PATH, { recursive: true });
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 } catch {}
 
 try {
   const saved = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8'));
   if (Array.isArray(saved.contacts)) saved.contacts.forEach((c) => contacts.add(c));
 } catch {}
+
+try {
+  const meta = JSON.parse(fs.readFileSync(SESSIONS_META_FILE, 'utf8'));
+  if (meta && typeof meta.names === 'object') Object.assign(sessionNames, meta.names);
+} catch {}
+
+function saveSessionNames() {
+  try {
+    fs.writeFileSync(SESSIONS_META_FILE, JSON.stringify({ names: sessionNames }, null, 2), 'utf8');
+  } catch {}
+}
 
 function saveContacts() {
   try {
@@ -51,82 +58,137 @@ function logLine(level, msg) {
   if (level !== 'debug') console.log(`[${line.t}] ${level.toUpperCase()}: ${msg}`);
 }
 
-function setRestartTimer(ms) {
-  clearTimeout(restartTimer);
-  restartTimer = setTimeout(connect, ms);
+// ------------------------- الجلسات (كل رقم جلسة مستقلة) -------------------------
+
+function makeSession(id, credsPath) {
+  return {
+    id,
+    credsPath,
+    sock: null,
+    lastQr: null,
+    pairCode: null,
+    connected: false,
+    pairingPhone: null,
+    starting: false,
+    restartTimer: null,
+    history: new Map(),
+  };
 }
 
-async function connect() {
-  if (starting) return;
-  starting = true;
-  logLine('info', 'جارٍ تشغيل البوت...');
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(CREDS_PATH);
-    const { version } = await import('@whiskeysockets/baileys').then((m) => m.fetchLatestBaileysVersion()).catch(() => ({ version: undefined }));
+function sessionLabel(s) {
+  const name = sessionNames[s.id]?.trim();
+  if (name) return name;
+  return s.pairingPhone || (s.id !== 'default' ? s.id : '');
+}
 
-    sock = makeWASocket({
-      version,
-      auth: state,
-      browser: Browsers.windows('WhatsApp AI Bot'),
-      logger: pino({ level: 'silent' }),
-      printQRInTerminal: false,
-      markOnlineOnConnect: true,
-      syncFullHistory: false,
-      shouldIgnoreJid: (jid) => jid.endsWith('@broadcast'),
-    });
+function findSession(phoneOrId) {
+  const q = String(phoneOrId || '').trim();
+  if (!q) return null;
+  for (const s of sessions.values()) {
+    if (s.id === q || s.pairingPhone === q || s.id === q.replace(/[^0-9]/g, '')) return s;
+  }
+  return null;
+}
 
-    sock.ev.on('creds.update', saveCreds);
+function startSession(s) {
+  if (s.starting) return;
+  s.starting = true;
+  const tag = sessionLabel(s) || s.id;
+  logLine('info', `[${tag}] جارٍ تشغيل الاتصال...`);
+  (async () => {
+    try {
+      const { state, saveCreds } = await useMultiFileAuthState(s.credsPath);
+      const { version } = await import('@whiskeysockets/baileys').then((m) => m.fetchLatestBaileysVersion()).catch(() => ({ version: undefined }));
 
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr, pairingCode } = update;
+      s.sock = makeWASocket({
+        version,
+        auth: state,
+        browser: Browsers.windows('WhatsApp AI Bot'),
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false,
+        markOnlineOnConnect: true,
+        syncFullHistory: false,
+        shouldIgnoreJid: (jid) => jid.endsWith('@broadcast'),
+      });
 
-      if (pairingCode) {
-        pairCode = pairingCode;
-        lastQr = null;
-        logLine('info', `كود الربط: ${pairingCode}`);
-      } else if (qr) {
-        lastQr = qr;
-        pairCode = null;
-        logLine('debug', 'QR محدث');
-      }
+      s.sock.ev.on('creds.update', saveCreds);
 
-      if (connection === 'open') {
-        connected = true;
-        pairingPhone = sock.user?.id?.split(':')[0] || null;
-        logLine('info', `✅ متصل بنجاح: ${pairingPhone || 'unknown'}`);
-      }
+      s.sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr, pairingCode } = update;
+        const lbl = sessionLabel(s) || s.id;
 
-      if (connection === 'close') {
-        connected = false;
-        lastQr = null;
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const reason = lastDisconnect?.error?.data?.reason;
-        if (statusCode === DisconnectReason.loggedOut || reason === DisconnectReason.loggedOut) {
-          logLine('warn', 'تم تسجيل الخروج من الجهاز — سيتم حذف الجلسة.');
-          try { fs.rmSync(CREDS_PATH, { recursive: true, force: true }); } catch {}
-          setRestartTimer(1000);
-        } else {
-          logLine('warn', `انقطع الاتصال (${statusCode || 'unknown'}) — إعادة المحاولة...`);
-          setRestartTimer(5000);
+        if (pairingCode) {
+          s.pairCode = pairingCode;
+          s.lastQr = null;
+          logLine('info', `[${lbl}] كود الربط: ${pairingCode}`);
+        } else if (qr) {
+          s.lastQr = qr;
+          s.pairCode = null;
+          logLine('debug', `[${lbl}] QR محدث`);
         }
-      }
-    });
 
-    sock.ev.on('messages.upsert', (data) => {
-      if (!data || !data.messages || data.type !== 'notify') return;
-      for (const msg of data.messages) {
-        handleMessage(msg).catch((err) => logLine('error', `خطأ في معالجة الرسالة: ${err.message}`));
-      }
-    });
+        if (connection === 'open') {
+          s.connected = true;
+          s.pairingPhone = s.sock?.user?.id?.split(':')[0] || null;
+          logLine('info', `[${lbl}] ✅ متصل بنجاح: ${sessionLabel(s) || 'unknown'}`);
+        }
 
-    logLine('info', 'البوت يعمل. في انتظار ربط الهاتف...');
-  } catch (err) {
-    logLine('error', `فشل التشغيل: ${err.message}`);
-    setRestartTimer(8000);
-  } finally {
-    starting = false;
+        if (connection === 'close') {
+          s.connected = false;
+          s.lastQr = null;
+          const statusCode = lastDisconnect?.error?.output?.statusCode;
+          const reason = lastDisconnect?.error?.data?.reason;
+          if (statusCode === DisconnectReason.loggedOut || reason === DisconnectReason.loggedOut) {
+            logLine('warn', `[${lbl}] تم تسجيل الخروج من الجهاز — سيتم حذف الجلسة.`);
+            try { fs.rmSync(s.credsPath, { recursive: true, force: true }); } catch {}
+            clearTimeout(s.restartTimer);
+            s.restartTimer = setTimeout(() => startSession(s), 1000);
+          } else {
+            logLine('warn', `[${lbl}] انقطع الاتصال (${statusCode || 'unknown'}) — إعادة المحاولة...`);
+            clearTimeout(s.restartTimer);
+            s.restartTimer = setTimeout(() => startSession(s), 5000);
+          }
+        }
+      });
+
+      s.sock.ev.on('messages.upsert', (data) => {
+        if (!data || !data.messages || data.type !== 'notify') return;
+        for (const msg of data.messages) {
+          handleMessage(msg, s).catch((err) => logLine('error', `خطأ في معالجة الرسالة: ${err.message}`));
+        }
+      });
+
+      logLine('info', `[${tag}] جاهز. في انتظار ربط الهاتف...`);
+    } catch (err) {
+      logLine('error', `[${tag}] فشل التشغيل: ${err.message}`);
+      s.restartTimer = setTimeout(() => startSession(s), 8000);
+    } finally {
+      s.starting = false;
+    }
+  })();
+}
+
+function bootSessions() {
+  // الجلسة الأساسية القديمة (للتوافق مع ما سبق)
+  const defaultPath = path.join(DATA_DIR, 'session');
+  try { fs.mkdirSync(defaultPath, { recursive: true }); } catch {}
+  const primary = makeSession('default', defaultPath);
+  sessions.set('default', primary);
+  startSession(primary);
+
+  // أي جلسات إضافية موجودة على القرص
+  let dirs = [];
+  try { dirs = fs.readdirSync(SESSIONS_DIR).filter((d) => /^\d+$/.test(d)); } catch {}
+  for (const d of dirs) {
+    const dirPath = path.join(SESSIONS_DIR, d);
+    if (!fs.existsSync(path.join(dirPath, 'creds.json'))) continue;
+    const s = makeSession(d, dirPath);
+    sessions.set(d, s);
+    startSession(s);
   }
 }
+
+// ------------------------- منطق الرد -------------------------
 
 function buildCatalog() {
   const items = config.catalog || [];
@@ -151,7 +213,8 @@ function matchesCatalogCommand(text, commands) {
   return (commands || []).some((c) => t === c.toLowerCase());
 }
 
-async function handleMessage(msg) {
+async function handleMessage(msg, session) {
+  const sock = session?.sock;
   if (!sock || !msg.message) return;
   if (msg.key?.fromMe) return;
   if (msg.key?.remoteJid?.endsWith('@broadcast')) return;
@@ -162,16 +225,16 @@ async function handleMessage(msg) {
   const isGroup = jid.endsWith('@g.us');
   const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || '').trim();
   if (!text) return;
-  logLine('debug', `رسالة جديدة من ${jid}: ${text.slice(0, 60)}`);
+  logLine('debug', `[${sessionLabel(session) || session.id}] رسالة جديدة من ${jid}: ${text.slice(0, 60)}`);
 
   const from = isGroup ? msg.key.participant : jid;
   const contactName = (msg.pushName || 'العميل').split(' ')[0];
 
   const hKey = jid;
-  const hist = history.get(hKey) || [];
+  const hist = session.history.get(hKey) || [];
   hist.push(`${contactName}: ${text}`);
   if (hist.length > 20) hist.splice(0, hist.length - 20);
-  history.set(hKey, hist);
+  session.history.set(hKey, hist);
 
   const seenBefore = contacts.has(jid);
 
@@ -209,7 +272,7 @@ async function handleMessage(msg) {
     await sock.sendMessage(jid, { text: reply }, { quoted: msg }).catch((err) => {
       logLine('error', `فشل الإرسال إلى ${jid}: ${err.message}`);
     });
-    logLine('info', `رد → ${jid}: ${reply.slice(0, 80)}${reply.length > 80 ? '...' : ''}`);
+    logLine('info', `[${sessionLabel(session) || session.id}] رد → ${jid}: ${reply.slice(0, 80)}${reply.length > 80 ? '...' : ''}`);
   }
 
   if (!seenBefore) {
@@ -218,10 +281,15 @@ async function handleMessage(msg) {
   }
 }
 
-async function sendMessage(phone, text) {
-  if (!sock || !connected) return { ok: false, error: 'NOT_CONNECTED' };
-  const jid = jidNormalizedUser(phone.replace(/[^0-9]/g, ''));
-  await sock.sendMessage(jid, { text });
+async function sendMessage(phone, text, sessionId) {
+  let s = sessionId ? findSession(sessionId) : null;
+  if (!s) {
+    s = [...sessions.values()].find((x) => x.connected && x.pairingPhone === String(phone).replace(/[^0-9]/g, '')) || null;
+  }
+  if (!s) s = [...sessions.values()].find((x) => x.connected) || null;
+  if (!s?.sock || !s.connected) return { ok: false, error: 'NOT_CONNECTED' };
+  const jid = jidNormalizedUser(String(phone).replace(/[^0-9]/g, ''));
+  await s.sock.sendMessage(jid, { text });
   return { ok: true };
 }
 
@@ -230,30 +298,71 @@ async function sendMessage(phone, text) {
 const app = express();
 app.use(express.json());
 
+function sessionStatus(s) {
+  return {
+    id: s.id,
+    name: sessionNames[s.id] || '',
+    phone: s.pairingPhone || (s.id !== 'default' ? s.id : null),
+    connected: s.connected,
+    hasQr: !!s.lastQr,
+    pairCode: s.pairCode,
+    starting: s.starting,
+  };
+}
+
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WhatsApp AI Bot</title><style>
-body{font-family:Segoe UI,Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.card{background:#1e293b;border-radius:16px;padding:40px 48px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.4);max-width:480px}
-h1{font-size:22px;margin:0 0 8px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-left:8px}
+body{font-family:Segoe UI,Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;margin:0;padding:24px}
+.wrap{max-width:720px;margin:0 auto}
+h1{font-size:22px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-left:8px}
 .green{background:#22c55e}.amber{background:#f59e0b}.red{background:#ef4444}
 p{color:#94a3b8;margin:6px 0}a{color:#38bdf8;text-decoration:none}
-img.qr{width:280px;height:280px;border-radius:8px;margin:16px auto;background:#fff}
-</style></head><body><div class="card">
-<h1><span class="dot" id="d"></span>WhatsApp AI Bot</h1>
-<p id="s">...</p><img class="qr" id="qr" style="display:none" alt="QR">
-<p id="hint" style="display:none">افتح واتساب على موبايلك → الإعدادات → الأجهزة المرتبطة → ربط جهاز → سكّن الكود</p>
-<p>البوت شغال على هذه السحابة — الردود التلقائية على واتساب 24/7</p>
-<p><a href="/api/status">/api/status</a></p>
+.card{background:#1e293b;border-radius:16px;padding:24px;margin:16px 0;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+img.qr{width:240px;height:240px;border-radius:8px;margin:12px auto;background:#fff;display:block}
+input,button{font-size:15px;padding:10px 14px;border-radius:8px;border:0;margin:4px}
+input{background:#0f172a;color:#e2e8f0;width:200px}
+button{background:#38bdf8;color:#0f172a;font-weight:bold;cursor:pointer}
+</style></head><body><div class="wrap">
+<h1>🤖 WhatsApp AI Bot — لوحة التحكم</h1>
+<p>البوت شغال على هذه السحابة 24/7 — الردود التلقائية على واتساب</p>
+<div id="cards"></div>
+<div class="card"><b>➕ ربط رقم جديد</b><br>
+<input id="ph" placeholder="مثال: 201012345678" inputmode="numeric">
+<button onclick="pair()">ربط الرقم</button><p id="pairmsg" style="color:#f59e0b"></p></div>
 <script>
-function refresh(){fetch('/api/status').then(r=>r.json()).then(j=>{
-var d=document.getElementById('d');d.className='dot '+(j.connected?'green':(j.hasQr?'amber':'red'));
-document.getElementById('s').textContent='الحالة: '+(j.connected?'متصل بواتساب ✓':(j.hasQr?'بانتظار ربط جهاز (QR)':'جارٍ الاتصال...'));
-document.getElementById('qr').style.display=j.hasQr?'block':'none';
-document.getElementById('hint').style.display=j.hasQr?'block':'none';
-if(j.hasQr)document.getElementById('qr').src='/api/qr.png?t='+Date.now();
-}).catch(()=>{document.getElementById('s').textContent='جارٍ التشغيل...';});}
+function cardsHTML(list){
+  if(!list||!list.length) return '<div class="card">لا توجد جلسات</div>';
+  return list.map(function(s){
+    var st=s.connected?'متصل ✓':(s.hasQr?'بانتظار ربط جهاز (QR)':'جارٍ الاتصال...');
+    var cls=s.connected?'green':(s.hasQr?'amber':'red');
+    var title=s.name?('<b>'+s.name+'</b> <span style="color:#94a3b8;font-size:13px">('+(s.phone||s.id)+')</span>'):('<b>'+(s.phone||s.id)+'</b>');
+    var qr=s.hasQr?'<img class="qr" src="/api/qr.png?phone='+encodeURIComponent(s.id)+'&t='+Date.now()+'">'+(s.id==='default'?'<p style="font-size:13px">افتح واتساب → الأجهزة المرتبطة → ربط جهاز → سكّن الكود</p>':'<p style="font-size:13px">افتح واتساب على رقم '+s.id+' → الأجهزة المرتبطة → ربط جهاز → سكّن الكود</p>'):'';
+    var pc=s.pairCode?'<p style="color:#f59e0b;font-weight:bold">كود الربط: '+s.pairCode+'</p>':'';
+    var nm='<input id="nm-'+s.id+'" placeholder="اسم مخصص" value="'+s.name+'" style="width:140px"> <button onclick="rename(\''+s.id+'\')">حفظ الاسم</button>';
+    return '<div class="card"><span class="dot '+cls+'"></span>'+title+ ' — <span>'+st+'</span>'+pc+qr+'<div style="margin-top:12px">'+nm+'</div></div>';
+  }).join('');
+}
+function rename(id){
+  var v=document.getElementById('nm-'+id).value.trim();
+  fetch('/api/session-name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:id,name:v})})
+   .then(r=>r.json()).then(()=>refresh()).catch(()=>{});
+}
+function refresh(){
+  fetch('/api/status').then(r=>r.json()).then(j=>{
+    document.getElementById('cards').innerHTML=cardsHTML(j.sessions);
+  }).catch(()=>{});
+}
+function pair(){
+  var ph=document.getElementById('ph').value.trim();
+  if(!ph||!/^[0-9]+$/.test(ph)){document.getElementById('pairmsg').textContent='اكتب الرقم بالصيغة الدولية أرقام فقط (مثال: 201012345678)';return;}
+  fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:ph})})
+   .then(r=>r.json()).then(j=>{
+     document.getElementById('pairmsg').textContent=j.ok?'تم إنشاء جلسة الرقم — انتظر ظهور الـ QR بالأعلى':'خطأ: '+(j.error||'');
+     refresh();
+   }).catch(()=>{});
+}
 refresh();setInterval(refresh,3000);
 </script></div></body></html>`);
 });
@@ -267,28 +376,79 @@ function checkAuth(req, res, next) {
 }
 
 app.get('/api/status', (req, res) => {
-  res.json({
+  const list = [...sessions.values()];
+  const reqPhone = req.query.phone;
+  const target = reqPhone ? findSession(reqPhone) : null;
+  if (reqPhone && !target) return res.status(404).json({ ok: false, error: 'SESSION_NOT_FOUND' });
+  const base = {
     ok: true,
-    connected,
-    pairingPhone,
-    hasQr: !!lastQr,
-    pairCode,
     botVersion: '1.0.0',
     aiKeyConfigured: !!(config.ai?.apiKey),
     volume: !!process.env.RAILWAY_VOLUME_MOUNT_PATH,
     persistent: DATA_DIR !== __dirname,
+  };
+  if (target) return res.json({ ...base, ...sessionStatus(target) });
+  const connectedOne = list.find((s) => s.connected);
+  const qrOne = list.find((s) => s.lastQr);
+  res.json({
+    ...base,
+    sessions: list.map(sessionStatus),
+    connected: list.some((s) => s.connected),
+    pairingPhone: connectedOne?.pairingPhone || null,
+    hasQr: !!qrOne,
+    pairCode: qrOne?.pairCode || null,
   });
 });
 
 app.get('/api/qr', (req, res) => {
-  if (!lastQr) return res.status(404).json({ ok: false, error: 'NO_QR' });
-  res.json({ ok: true, qr: lastQr });
+  const s = req.query.phone ? findSession(req.query.phone) : ([...sessions.values()].find((x) => x.lastQr) || sessions.get('default'));
+  if (!s?.lastQr) return res.status(404).json({ ok: false, error: 'NO_QR' });
+  res.json({ ok: true, qr: s.lastQr });
 });
 
 app.get('/api/qr.png', async (req, res) => {
-  if (!lastQr) return res.status(404).json({ ok: false, error: 'NO_QR' });
-  const png = await QRCode.toBuffer(lastQr, { width: 512, margin: 2 });
+  const s = req.query.phone ? findSession(req.query.phone) : ([...sessions.values()].find((x) => x.lastQr) || sessions.get('default'));
+  if (!s?.lastQr) return res.status(404).json({ ok: false, error: 'NO_QR' });
+  const png = await QRCode.toBuffer(s.lastQr, { width: 512, margin: 2 });
   res.type('png').send(png);
+});
+
+app.post('/api/pair', checkAuth, (req, res) => {
+  const phone = String(req.body?.phone || '').replace(/[^0-9]/g, '');
+  if (!/^[0-9]{6,15}$/.test(phone)) return res.status(400).json({ ok: false, error: 'BAD_PHONE' });
+  const existing = findSession(phone);
+  if (existing) return res.json({ ok: true, already: true, id: existing.id });
+  const dirPath = path.join(SESSIONS_DIR, phone);
+  try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
+  const s = makeSession(phone, dirPath);
+  sessions.set(phone, s);
+  startSession(s);
+  logLine('info', `تمت إضافة رقم جديد: ${phone}`);
+  res.json({ ok: true, id: phone });
+});
+
+app.post('/api/unpair', checkAuth, (req, res) => {
+  const phone = String(req.body?.phone || '').replace(/[^0-9]/g, '');
+  const s = findSession(phone);
+  if (!s || s.id === 'default') return res.status(404).json({ ok: false, error: 'SESSION_NOT_FOUND' });
+  clearTimeout(s.restartTimer);
+  try { s.sock?.end(new Error('unpair requested')); } catch {}
+  try { fs.rmSync(s.credsPath, { recursive: true, force: true }); } catch {}
+  sessions.delete(s.id);
+  logLine('info', `تم حذف الرقم: ${phone}`);
+  res.json({ ok: true });
+});
+
+app.post('/api/session-name', checkAuth, (req, res) => {
+  const phone = String(req.body?.phone || '').replace(/[^0-9]/g, '');
+  const s = findSession(phone);
+  if (!s) return res.status(404).json({ ok: false, error: 'SESSION_NOT_FOUND' });
+  const name = String(req.body?.name || '').trim().slice(0, 50);
+  if (name) sessionNames[s.id] = name;
+  else delete sessionNames[s.id];
+  saveSessionNames();
+  logLine('info', `تم تسمية الرقم ${phone}: ${name || '(بدون اسم)'}`);
+  res.json({ ok: true });
 });
 
 app.get('/api/logs', checkAuth, (req, res) => {
@@ -324,9 +484,9 @@ app.put('/api/config', checkAuth, (req, res) => {
 });
 
 app.post('/api/send', checkAuth, (req, res) => {
-  const { to, text } = req.body || {};
+  const { to, text, phone } = req.body || {};
   if (!to || !text) return res.status(400).json({ ok: false, error: 'BAD_BODY' });
-  sendMessage(String(to), String(text))
+  sendMessage(String(to), String(text), phone)
     .then((r) => res.json(r))
     .catch((err) => res.json({ ok: false, error: err.message }));
 });
@@ -346,14 +506,14 @@ function startListening() {
   const host = normalizeHost(process.env.HOST);
   const server = app.listen(PORT, host, () => {
     logLine('info', `لوحة API شغالة على ${host}:${PORT}`);
-    connect();
+    bootSessions();
   });
   server.on('error', (err) => {
     logLine('error', `فشل فتح المنفذ على ${host} (${err.message}) — إعادة المحاولة على 0.0.0.0`);
     try { server.close(); } catch {}
     setTimeout(() => app.listen(PORT, '0.0.0.0', () => {
       logLine('info', `لوحة API شغالة على 0.0.0.0:${PORT}`);
-      connect();
+      bootSessions();
     }), 500);
   });
 }
