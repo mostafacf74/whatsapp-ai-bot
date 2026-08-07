@@ -130,7 +130,25 @@ function startSession(s) {
         if (connection === 'open') {
           s.connected = true;
           s.pairingPhone = s.sock?.user?.id?.split(':')[0] || null;
-          logLine('info', `[${lbl}] ✅ متصل بنجاح: ${sessionLabel(s) || 'unknown'}`);
+          logLine('info', `[${sessionLabel(s) || s.id}] ✅ متصل بنجاح: ${sessionLabel(s) || 'unknown'}`);
+          // إعادة تسمية الجلسة المؤقتة برقم الهاتف الفعلي (حتى تبقى بعد restart)
+          const realPhone = s.pairingPhone;
+          if (s.id !== 'default' && !/^\d+$/.test(s.id) && realPhone && s.credsPath !== path.join(SESSIONS_DIR, realPhone)) {
+            try {
+              const newDir = path.join(SESSIONS_DIR, realPhone);
+              fs.mkdirSync(newDir, { recursive: true });
+              fs.cpSync(s.credsPath, newDir, { recursive: true, force: true });
+              fs.rmSync(s.credsPath, { recursive: true, force: true });
+              sessions.delete(s.id);
+              s.id = realPhone;
+              s.credsPath = newDir;
+              sessions.set(s.id, s);
+              if (sessionNames[s.id] == null) sessionNames[s.id] = '';
+              logLine('info', `تم تثبيت جلسة الرقم ${realPhone}`);
+            } catch (err) {
+              logLine('warn', `فشل تثبيت الجلسة: ${err.message}`);
+            }
+          }
         }
 
         if (connection === 'close') {
@@ -315,53 +333,75 @@ app.get('/', (req, res) => {
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WhatsApp AI Bot</title><style>
 body{font-family:Segoe UI,Tahoma,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;margin:0;padding:24px}
-.wrap{max-width:720px;margin:0 auto}
+.wrap{max-width:760px;margin:0 auto}
 h1{font-size:22px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-left:8px}
 .green{background:#22c55e}.amber{background:#f59e0b}.red{background:#ef4444}
 p{color:#94a3b8;margin:6px 0}a{color:#38bdf8;text-decoration:none}
-.card{background:#1e293b;border-radius:16px;padding:24px;margin:16px 0;box-shadow:0 10px 40px rgba(0,0,0,.4)}
-img.qr{width:240px;height:240px;border-radius:8px;margin:12px auto;background:#fff;display:block}
+.tabs{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+.tab{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:10px 16px;cursor:pointer;user-select:none}
+.tab.active{background:#38bdf8;color:#0f172a;font-weight:bold}
+.card{background:#1e293b;border-radius:16px;padding:24px;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+img.qr{width:260px;height:260px;border-radius:8px;margin:12px auto;background:#fff;display:block}
 input,button{font-size:15px;padding:10px 14px;border-radius:8px;border:0;margin:4px}
 input{background:#0f172a;color:#e2e8f0;width:200px}
 button{background:#38bdf8;color:#0f172a;font-weight:bold;cursor:pointer}
+button.add{background:#22c55e;font-size:17px;padding:12px 24px}
+button.danger{background:#ef4444}
 </style></head><body><div class="wrap">
 <h1>🤖 WhatsApp AI Bot — لوحة التحكم</h1>
-<p>البوت شغال على هذه السحابة 24/7 — الردود التلقائية على واتساب</p>
-<div id="cards"></div>
-<div class="card"><b>➕ ربط رقم جديد</b><br>
-<input id="ph" placeholder="مثال: 201012345678" inputmode="numeric">
-<button onclick="pair()">ربط الرقم</button><p id="pairmsg" style="color:#f59e0b"></p></div>
+<p>البوت شغال 24/7 — كل رقم في تبويب مستقل</p>
+<button class="add" onclick="addNum()">➕ إضافة رقم جديد</button>
+<div class="tabs" id="tabs"></div>
+<div class="card" id="content">...جارٍ التحميل...</div>
 <script>
-function cardsHTML(list){
-  if(!list||!list.length) return '<div class="card">لا توجد جلسات</div>';
-  return list.map(function(s){
-    var st=s.connected?'متصل ✓':(s.hasQr?'بانتظار ربط جهاز (QR)':'جارٍ الاتصال...');
+var cur=null;
+function label(s){return s.name?s.name:(s.phone||s.id);}
+function render(list){
+  var tabs=document.getElementById('tabs');tabs.innerHTML='';
+  if(!list||!list.length){tabs.innerHTML='<div class="tab" style="cursor:default">لا توجد أرقام بعد — اضغط "إضافة رقم جديد"</div>';document.getElementById('content').innerHTML='';return;}
+  if(cur==null||!list.some(function(x){return x.id===cur;}))cur=list[0].id;
+  list.forEach(function(s){
     var cls=s.connected?'green':(s.hasQr?'amber':'red');
-    var title=s.name?('<b>'+s.name+'</b> <span style="color:#94a3b8;font-size:13px">('+(s.phone||s.id)+')</span>'):('<b>'+(s.phone||s.id)+'</b>');
-    var qr=s.hasQr?'<img class="qr" src="/api/qr.png?phone='+encodeURIComponent(s.id)+'&t='+Date.now()+'">'+(s.id==='default'?'<p style="font-size:13px">افتح واتساب → الأجهزة المرتبطة → ربط جهاز → سكّن الكود</p>':'<p style="font-size:13px">افتح واتساب على رقم '+s.id+' → الأجهزة المرتبطة → ربط جهاز → سكّن الكود</p>'):'';
-    var pc=s.pairCode?'<p style="color:#f59e0b;font-weight:bold">كود الربط: '+s.pairCode+'</p>':'';
-    var nm='<input id="nm-'+s.id+'" placeholder="اسم مخصص" value="'+s.name+'" style="width:140px"> <button onclick="rename(\''+s.id+'\')">حفظ الاسم</button>';
-    return '<div class="card"><span class="dot '+cls+'"></span>'+title+ ' — <span>'+st+'</span>'+pc+qr+'<div style="margin-top:12px">'+nm+'</div></div>';
-  }).join('');
+    var t=document.createElement('div');
+    t.className='tab'+(s.id===cur?' active':'');
+    t.innerHTML='<span class="dot '+cls+'"></span>'+label(s);
+    t.onclick=function(){cur=s.id;render(list);};
+    tabs.appendChild(t);
+  });
+  var s=list.find(function(x){return x.id===cur;});
+  var content=document.getElementById('content');
+  if(!s){content.innerHTML='';return;}
+  var st=s.connected?'متصل ✓':(s.hasQr?'بانتظار ربط جهاز (QR)':'جارٍ الاتصال...');
+  var cls=s.connected?'green':(s.hasQr?'amber':'red');
+  var hint=s.id.startsWith('tmp_')?'':(s.id==='default'?'افتح واتساب → الأجهزة المرتبطة → ربط جهاز → سكّن الكود':'افتح واتساب على رقم '+s.id+' → الأجهزة المرتبطة → ربط جهاز → سكّن الكود');
+  var html='<span class="dot '+cls+'"></span><b>'+label(s)+'</b> — '+st;
+  if(s.pairCode)html+='<p style="color:#f59e0b;font-weight:bold">كود الربط: '+s.pairCode+'</p>';
+  if(s.hasQr)html+='<img class="qr" src="/api/qr.png?phone='+encodeURIComponent(s.id)+'&t='+Date.now()+'"><p style="font-size:13px">'+hint+'</p>';
+  html+='<div style="margin-top:14px"><input id="nm-'+s.id+'" placeholder="اسم مخصص (اختياري)" value="'+s.name+'"><button onclick="rename(\''+s.id+'\')">حفظ الاسم</button></div>';
+  html+='<button class="danger" style="margin-top:10px" onclick="del(\''+s.id+'\')">🗑 حذف هذا الرقم</button>';
+  content.innerHTML=html;
+}
+function refresh(){
+  fetch('/api/status').then(r=>r.json()).then(j=>{
+    if(j.sessions)render(j.sessions);
+    else if(j.id)render([j]);
+  }).catch(()=>{});
+}
+function addNum(){
+  fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+   .then(r=>r.json()).then(j=>{
+     if(j.ok){cur=j.id;refresh();}else{alert('خطأ: '+j.error);}
+   }).catch(()=>{});
 }
 function rename(id){
   var v=document.getElementById('nm-'+id).value.trim();
   fetch('/api/session-name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:id,name:v})})
    .then(r=>r.json()).then(()=>refresh()).catch(()=>{});
 }
-function refresh(){
-  fetch('/api/status').then(r=>r.json()).then(j=>{
-    document.getElementById('cards').innerHTML=cardsHTML(j.sessions);
-  }).catch(()=>{});
-}
-function pair(){
-  var ph=document.getElementById('ph').value.trim();
-  if(!ph||!/^[0-9]+$/.test(ph)){document.getElementById('pairmsg').textContent='اكتب الرقم بالصيغة الدولية أرقام فقط (مثال: 201012345678)';return;}
-  fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:ph})})
-   .then(r=>r.json()).then(j=>{
-     document.getElementById('pairmsg').textContent=j.ok?'تم إنشاء جلسة الرقم — انتظر ظهور الـ QR بالأعلى':'خطأ: '+(j.error||'');
-     refresh();
-   }).catch(()=>{});
+function del(id){
+  if(!confirm('حذف هذا الرقم؟ سيتم قطع الاتصال نهائيًا'))return;
+  fetch('/api/unpair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:id})})
+   .then(r=>r.json()).then(()=>{cur=null;refresh();}).catch(()=>{});
 }
 refresh();setInterval(refresh,3000);
 </script></div></body></html>`);
@@ -414,40 +454,52 @@ app.get('/api/qr.png', async (req, res) => {
 });
 
 app.post('/api/pair', checkAuth, (req, res) => {
-  const phone = String(req.body?.phone || '').replace(/[^0-9]/g, '');
-  if (!/^[0-9]{6,15}$/.test(phone)) return res.status(400).json({ ok: false, error: 'BAD_PHONE' });
-  const existing = findSession(phone);
-  if (existing) return res.json({ ok: true, already: true, id: existing.id });
-  const dirPath = path.join(SESSIONS_DIR, phone);
-  try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
-  const s = makeSession(phone, dirPath);
-  sessions.set(phone, s);
+  const rawPhone = String(req.body?.phone || '').replace(/[^0-9]/g, '');
+  if (rawPhone) {
+    if (!/^[0-9]{6,15}$/.test(rawPhone)) return res.status(400).json({ ok: false, error: 'BAD_PHONE' });
+    const existing = findSession(rawPhone);
+    if (existing) return res.json({ ok: true, already: true, id: existing.id });
+    const dirPath = path.join(SESSIONS_DIR, rawPhone);
+    try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
+    const s = makeSession(rawPhone, dirPath);
+    sessions.set(rawPhone, s);
+    startSession(s);
+    logLine('info', `تمت إضافة رقم جديد: ${rawPhone}`);
+    return res.json({ ok: true, id: rawPhone });
+  }
+  // بدون رقم: جلسة مؤقتة — الـ QR يظهر فورًا ويُثبَّت برقم الهاتف عند الربط
+  const tmpId = 'tmp_' + Date.now();
+  const tmpDir = path.join(DATA_DIR, 'tmp', tmpId);
+  try { fs.mkdirSync(tmpDir, { recursive: true }); } catch {}
+  const s = makeSession(tmpId, tmpDir);
+  sessions.set(tmpId, s);
   startSession(s);
-  logLine('info', `تمت إضافة رقم جديد: ${phone}`);
-  res.json({ ok: true, id: phone });
+  logLine('info', 'فتح ربط جديد (جلسة مؤقتة)');
+  res.json({ ok: true, id: tmpId, tmp: true });
 });
 
 app.post('/api/unpair', checkAuth, (req, res) => {
-  const phone = String(req.body?.phone || '').replace(/[^0-9]/g, '');
-  const s = findSession(phone);
-  if (!s || s.id === 'default') return res.status(404).json({ ok: false, error: 'SESSION_NOT_FOUND' });
+  const key = String(req.body?.phone || req.body?.id || '').trim();
+  const s = findSession(key);
+  if (!s) return res.status(404).json({ ok: false, error: 'SESSION_NOT_FOUND' });
+  if (s.id === 'default') return res.status(400).json({ ok: false, error: 'CANNOT_DELETE_DEFAULT' });
   clearTimeout(s.restartTimer);
   try { s.sock?.end(new Error('unpair requested')); } catch {}
   try { fs.rmSync(s.credsPath, { recursive: true, force: true }); } catch {}
   sessions.delete(s.id);
-  logLine('info', `تم حذف الرقم: ${phone}`);
+  logLine('info', `تم حذف الجلسة: ${key}`);
   res.json({ ok: true });
 });
 
 app.post('/api/session-name', checkAuth, (req, res) => {
-  const phone = String(req.body?.phone || '').replace(/[^0-9]/g, '');
-  const s = findSession(phone);
+  const key = String(req.body?.phone || '').trim();
+  const s = findSession(key);
   if (!s) return res.status(404).json({ ok: false, error: 'SESSION_NOT_FOUND' });
   const name = String(req.body?.name || '').trim().slice(0, 50);
   if (name) sessionNames[s.id] = name;
   else delete sessionNames[s.id];
   saveSessionNames();
-  logLine('info', `تم تسمية الرقم ${phone}: ${name || '(بدون اسم)'}`);
+  logLine('info', `تم تسمية الجلسة ${s.id}: ${name || '(بدون اسم)'}`);
   res.json({ ok: true });
 });
 
